@@ -1,28 +1,34 @@
-"""Single source of truth for the 2026 official Ljubljana Marathon distances."""
+"""Historical Ljubljana Marathon archive (1996-2026, excluding the virtual 2020 event)."""
 from urllib.parse import urlencode
 
-EVENT_YEAR = 2026
+EVENT_YEARS = tuple(list(range(1996, 2020)) + list(range(2021, 2027)))
+# Numbered editions skipped 2020; virtual 2020 results have no chip times.
+LM_EDITION = {y: (y-1995 if y <= 2019 else y-1996) for y in EVENT_YEARS}
+ALL_SPLITS = [5, 10, 15, 20, 30]
 RACES = {
     '10': {'label': '10 km · Garmin', 'long_name': 'Garmin 10 km', 'km': 10.0,
-           'event': 7091, 'disc': {'M': '10M', 'F': '10Z'}, 'checkpoints': [5],
-           'age_disc': {}, 'date': '2026-10-17'},
+           'disc': {'M': 'RM', 'F': 'RZ'}, 'checkpoints': [5], 'age_disc': {}},
     '21': {'label': '21.1 km · Half marathon', 'long_name': 'Half marathon', 'km': 21.0975,
-           'event': 7092, 'disc': {'M': '21M', 'F': '21Z'}, 'checkpoints': [5, 10, 15, 20],
-           'age_disc': {'M': [f'21M{a}' for a in 'ABCDEFGHI'],
-                        'F': [f'21Z{a}' for a in 'ABCDEFGHI']}, 'date': '2026-10-18'},
+           'disc': {'M': '21M', 'F': '21Z'}, 'checkpoints': [5, 10, 15, 20], 'age_disc': {}},
     '42': {'label': '42.2 km · Marathon', 'long_name': 'Marathon', 'km': 42.195,
-           'event': 7092, 'disc': {'M': '42M', 'F': '42Z'}, 'checkpoints': [10, 20, 30],
-           'age_disc': {'M': [f'42M{a}' for a in 'ABCDEFGHI'],
-                        'F': [f'42Z{a}' for a in 'ABCDEFGHI']}, 'date': '2026-10-18'},
+           'disc': {'M': '42M', 'F': '42Z'}, 'checkpoints': [10, 20, 30], 'age_disc': {}},
 }
-ALL_SPLITS = [5, 10, 15, 20, 30]
+RACE_DATES = {2025: {'10': '2025-10-18', '21': '2025-10-19', '42': '2025-10-19'},
+              2026: {'10': '2026-10-17', '21': '2026-10-18', '42': '2026-10-18'}}
 
 
-def source_url(race, category):
-    config = RACES[str(race)]
-    return 'https://www.timingljubljana.si/rezultati.aspx?' + urlencode({
-        'disc': category, 'embed': '', 'idTekme': config['event'], 'tip': 'B'})
+def race_date(year, race):
+    return RACE_DATES.get(int(year), {}).get(str(race))
 
 
-def results_stem(race):
-    return f'2026_ljubljana_{race}k_results'
+def source_url(race, category, year=2026):
+    if int(year) not in LM_EDITION or str(race) not in RACES:
+        raise ValueError(f'Unrecognized year or race: {year} {race}')
+    if category not in RACES[str(race)]['disc'].values():
+        raise ValueError(f'Invalid category for {race} km: {category}')
+    return 'https://ljubljanskimaraton.si/rezultati/posamezni?' + urlencode({
+        'cat': category, 'lm': LM_EDITION[int(year)]})
+
+
+def results_stem(race, year=2026):
+    return f'{int(year)}_ljubljana_{race}k_results'

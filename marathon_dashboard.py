@@ -1,4 +1,4 @@
-"""Interactive 2026 Ljubljana 10 km, half-marathon and marathon explorer.
+"""Interactive historical Ljubljana Marathon race results explorer.
 
 Run with: python -m streamlit run marathon_dashboard.py
 """
@@ -17,11 +17,11 @@ from dashboard_core import (
     BASELINE, FEMALE, MALE, SELECTED, COMPARE, distances_for,
     apply_delay_models, clock, detect_checkpoint_basis, get_profile, local_percentile,
     mean_profile, normalize_text, pack_profiles, percentile_summary,
-    read_results,
+    read_results, athlete_name_key, same_distance_year_matches, faster_than_percentile,
 )
-from race_config import RACES, ALL_SPLITS, results_stem
+from race_config import RACES, ALL_SPLITS, results_stem, EVENT_YEARS, race_date
 
-st.set_page_config(page_title="Ljubljana 2026 | All distances", page_icon="🏃", layout="wide",
+st.set_page_config(page_title="Ljubljana Marathon | Historical results", page_icon="🏃", layout="wide",
                    initial_sidebar_state="expanded")
 
 CSS = """
@@ -45,10 +45,10 @@ def prepare_models(frame):
     return apply_delay_models(frame)
 
 
-def source_file(race):
+def source_file(race, year):
     root = Path(__file__).resolve().parent
-    names = [results_stem(race) + ext for ext in ('.xlsx', '.csv')]
-    if race == '21':
+    names = [results_stem(race, year) + ext for ext in ('.xlsx', '.csv')]
+    if race == '21' and int(year) == 2026:
         names += ['2026_ljubljana_halfmarathon_results.xlsx',
                   '2026_ljubljana_halfmarathon_results.csv']
     for folder in dict.fromkeys([root, root.parent, Path.cwd()]):
@@ -57,6 +57,16 @@ def source_file(race):
             if path.is_file():
                 return path
     return None
+
+
+@st.cache_data(show_spinner="Reading other year's finishers…")
+def load_other_year(blob, filename, year):
+    result = read_results(io.BytesIO(blob), name=filename)
+    # Reject accidentally misnamed files that contain a different year.
+    if 'year' in result and result['year'].notna().any():
+        if set(result['year'].dropna().astype(int)) != {int(year)}:
+            raise ValueError(f'{filename} contains a different year than {year}.')
+    return result
 
 
 def runner_name(rec):
@@ -343,11 +353,11 @@ def residual_figure(df, models, selections, view, point_opacity):
 
 
 
-def runner_picker(frame, tag, color):
+def runner_picker(frame, tag, color, key_scope=""):
     """Independent name/bib search so runners A and B can be compared."""
     st.markdown(f'<span style="color:{color};font-size:19px">&#9679;</span> '
                 f'**Runner {tag}**', unsafe_allow_html=True)
-    search = st.text_input(f"Name or bib for runner {tag}", key=f"runner_search_{tag}",
+    search = st.text_input(f"Name or bib for runner {tag}", key=f"runner_search_{tag}_{key_scope}",
                            placeholder="Type a name or bib number")
     if not search.strip():
         return None
@@ -360,7 +370,7 @@ def runner_picker(frame, tag, color):
     options = hits.runner_id.tolist()
     labels = {rec.runner_id: f"{rec['name']}  |  #{rec.bib}  |  {rec.gender}  |  {clock(rec.net_time_sec)}"
               for _, rec in hits.iterrows()}
-    choice = st.selectbox(f"Select runner {tag}", options, key=f"runner_choice_{tag}",
+    choice = st.selectbox(f"Select runner {tag}", options, key=f"runner_choice_{tag}_{key_scope}",
                           format_func=lambda value: labels.get(value, value))
     if len(frame.loc[frame.search.str.contains(query, regex=False)]) > 100:
         st.caption("Showing the fastest 100 matches. Refine the name or bib.")
@@ -381,26 +391,32 @@ def runner_stats(rec, tag, color):
 
 
 # ------------------------------- Main app ----------------------------------
-st.title("Ljubljana Marathon 2026")
-st.markdown('<p class="intro">Finish-time distributions, split trajectories and two-runner comparisons · 10 / 21.1 / 42.2 km</p>',
+st.title("Ljubljana Marathon · Historical results")
+st.markdown('<p class="intro">Finish-time distributions, split trajectories and comparisons across runners and years · 10 / 21.1 / 42.2 km</p>',
             unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Race & data")
+    year = st.selectbox("Choose race year", options=sorted(EVENT_YEARS,reverse=True),
+                        index=0, key="race_year")
     race = st.selectbox("Choose race distance", options=list(RACES), index=1,
                         format_func=lambda value: RACES[value]['label'], key='race_distance')
-    st.caption(f"Official date: {RACES[race]['date']}  ·  {RACES[race]['km']:g} km")
+    date_str = race_date(year, race)
+    date_label = f"Official date: {date_str}" if date_str else str(year)
+    st.caption(f"{date_label}  ·  {RACES[race]['km']:g} km")
+    if race == "10" and year < 2019:
+        st.caption("Historical recreational races were sometimes shorter than 10 km; the scraper validates the distance before saving.")
     uploaded = st.file_uploader("Upload CSV or Excel for this distance", type=["csv", "xlsx"],
-                                key=f'upload_race_{race}',
+                                key=f'upload_race_{year}_{race}',
                                 help="Upload only results from the selected race distance.")
     if uploaded is not None:
         file_data, fname = uploaded.getvalue(), uploaded.name
         source_desc = f"Uploaded: {fname}"
     else:
-        found = source_file(race)
+        found = source_file(race, year)
         if found is None:
-            st.info(f"No {race} km file here yet. Run the scraper for {race} km, or upload the results.")
-            st.code(f"python scrape_ljubljana_2026.py --distance {race} --show-browser")
+            st.info(f"No {year} {race} km file here yet. Run the scraper, or upload the results.")
+            st.code(f"python scrape_ljubljana.py --year {year} --distance {race} --show-browser")
             st.stop()
         file_data, fname = found.read_bytes(), found.name
         source_desc = f"Local file: {fname}"
@@ -420,6 +436,9 @@ with st.sidebar:
 
 try:
     frame = load_data(file_data, fname)
+    if 'year' in frame.columns and frame['year'].notna().any():
+        if set(frame['year'].dropna().astype(int)) != {int(year)}:
+            raise ValueError(f"File does not match selected year {year}. Please upload the correct results.")
 except Exception as exc:
     st.error(f"Cannot read this results file: {exc}")
     st.stop()
@@ -431,8 +450,8 @@ frame, models = prepare_models(frame)
 with st.sidebar:
     st.divider()
     st.subheader("Compare runners")
-    selected_a = runner_picker(frame, "A", SELECTED)
-    selected_b = runner_picker(frame, "B", COMPARE)
+    selected_a = runner_picker(frame, "A", SELECTED, f"{year}_{race}")
+    selected_b = runner_picker(frame, "B", COMPARE, f"{year}_{race}")
     if selected_a is not None and selected_b is not None and selected_a.runner_id == selected_b.runner_id:
         st.warning("Runner B is the same person as A. Pick someone else to compare.")
         selected_b = None
@@ -499,8 +518,8 @@ if selections:
     else:
         runner_stats(*selections[0])
 
-section_distributions, section_splits, section_overperformance, section_data = st.tabs(
-    ["Finish distributions", "Split trajectories", "Overperformance", "Data quality"])
+section_distributions, section_splits, section_overperformance, section_years, section_data = st.tabs(
+    ["Finish distributions", "Split trajectories", "Overperformance", "Compare years", "Data quality"])
 
 with section_distributions:
     st.subheader("Finishing time distributions")
@@ -571,6 +590,168 @@ with section_overperformance:
     st.caption("Interpretation: positive residual = faster than expected for that start delay; negative = slower. This is descriptive, NOT a causal estimate of congestion or a fair performance ranking. Corral allocation, predicted pace and fitness strongly influence both starting position and net result.")
     st.caption("Method: equal-count start-delay bins → median chip times → weighted monotonic (isotonic) fit. Nearby-start percentile is based on the nearest same-sex start delays. Sparse samples can be unstable.")
 
+
+with section_years:
+    st.subheader("Compare results across editions")
+    st.caption("Choose any two downloaded years for the same distance. Each edition uses its own "
+               "gender-specific reference population. Confirm runner identity; bib numbers can change.")
+    available_years = sorted(
+        {int(y) for y in EVENT_YEARS if y == year or source_file(race, y) is not None}
+    )
+    if len(available_years) < 2:
+        st.info("Download at least one additional year for this race distance to compare results.")
+        st.code(f"python scrape_ljubljana.py --year 2025 2026 --distance {race} --show-browser")
+    else:
+        default_second = available_years[-1]
+        default_first = available_years[-2]
+        col_first, col_second = st.columns(2)
+        with col_first:
+            y1 = st.selectbox("Earlier / reference year", options=available_years,
+                              index=available_years.index(default_first), key=f"cross_y1_{race}")
+        with col_second:
+            other_options = [v for v in available_years if v != y1]
+            desired = default_second if default_second in other_options else other_options[-1]
+            y2 = st.selectbox("Comparison year", options=other_options,
+                              index=other_options.index(desired), key=f"cross_y2_{race}")
+        yearly = {}
+        for y in (y1, y2):
+            if y == year:
+                yearly[y] = frame
+                continue
+            other_path = source_file(race, y)
+            if other_path is not None:
+                try:
+                    other_df = load_other_year(other_path.read_bytes(), other_path.name, y)
+                    yearly[y], _ = prepare_models(other_df)
+                    status_path = other_path.with_suffix('.status.json')
+                    if status_path.exists():
+                        status = json.loads(status_path.read_text(encoding='utf-8'))
+                        if not status.get('overall_complete'):
+                            st.warning(f"{y} file is a partial scrape; percentile comparisons may be misleading.")
+                except Exception as exc:
+                    st.warning(f"Cannot load {y} {race} km results: {exc}")
+        if y1 not in yearly or y2 not in yearly:
+            st.info("Could not load both years. Add the matching Excel/CSV files and reload.")
+        else:
+            left_df, right_df = yearly[y1], yearly[y2]
+            st.caption(f"{y1}: {len(left_df):,} finishers · {y2}: {len(right_df):,} finishers")
+            cross_search = st.text_input(f"Find your {y1} result (name or bib)",
+                                         key=f"cross_search_{race}_{y1}_{y2}",
+                                         placeholder=f"Runner name or {y1} bib")
+            selected_first = None
+            selected_second = None
+            if cross_search.strip():
+                hits = left_df.loc[left_df.search.str.contains(normalize_text(cross_search.strip()), regex=False)]
+                hits = hits.sort_values(['net_time_sec', 'name']).head(150)
+                if hits.empty:
+                    st.info(f"No runner in {y1} matched that search.")
+                else:
+                    lookup_first = {r.runner_id: r for _,r in hits.iterrows()}
+                    key_first = st.selectbox(f"Choose the {y1} result", options=list(lookup_first),
+                        format_func=lambda k: f"{lookup_first[k]['name']} · #{lookup_first[k]['bib']} · {lookup_first[k]['gender']} · {clock(lookup_first[k]['net_time_sec'])}",
+                        key=f"cross_pick_first_{race}_{y1}_{y2}")
+                    selected_first = lookup_first[key_first]
+                    suggestions = same_distance_year_matches(selected_first, right_df)
+                    if len(suggestions):
+                        st.success(f"Found {len(suggestions)} possible name match(es) in {y2}. Confirm identity below.")
+                    else:
+                        st.info(f"No identical name in {y2}. Try manually searching for alternative spellings.")
+                    manual_second = st.text_input(f"Optional: search {y2} by name/bib",
+                                                  key=f"cross_search_second_{race}_{y1}_{y2}",
+                                                  placeholder="Alternative name spelling")
+                    candidates = suggestions.copy()
+                    if manual_second.strip():
+                        extra = right_df.loc[right_df.search.str.contains(
+                            normalize_text(manual_second.strip()), regex=False)]
+                        candidates = pd.concat([candidates, extra]).drop_duplicates('runner_id')
+                    if len(candidates):
+                        lookup_second = {r.runner_id: r for _,r in candidates.sort_values('net_time_sec').head(150).iterrows()}
+                        key_second = st.selectbox(f"Confirm the {y2} result (not automatically linked)",
+                            options=[None]+list(lookup_second), index=0,
+                            format_func=lambda k: "Select a result to compare" if k is None else
+                               f"{lookup_second[k]['name']} · #{lookup_second[k]['bib']} · {lookup_second[k]['gender']} · {clock(lookup_second[k]['net_time_sec'])}",
+                            key=f"cross_pick_second_{race}_{y1}_{y2}")
+                        if key_second is not None:
+                            selected_second = lookup_second[key_second]
+                    if selected_second is not None and selected_first.gender != selected_second.gender:
+                        st.error("The results have different gender classifications. Check athlete identity.")
+                        selected_second = None
+                    if selected_second is not None and athlete_name_key(selected_first['name']) != athlete_name_key(selected_second['name']):
+                        st.warning("The names differ. Verify that these are really the same athlete.")
+
+            if selected_first is not None and selected_second is not None:
+                percent_first = faster_than_percentile(left_df, selected_first)
+                percent_second = faster_than_percentile(right_df, selected_second)
+                delta = selected_first.net_time_sec - selected_second.net_time_sec
+                c1, c2, change_col = st.columns(3)
+                with c1:
+                    st.markdown(f"**{y1} · gold**")
+                    st.metric("Net time", clock(selected_first.net_time_sec))
+                    st.metric("Within-gender percentile", f"{percent_first:.1f}%")
+                    st.caption(f"{selected_first['name']} · bib #{selected_first['bib']} · gross {clock(selected_first.gross_time_sec)}")
+                    st.metric("Start delay", clock(selected_first.start_delay_sec, compact=True))
+                    st.metric("Above expected", clock(selected_first.overperformance_sec, signed=True, compact=True))
+                with c2:
+                    st.markdown(f"**{y2} · teal**")
+                    st.metric("Net time", clock(selected_second.net_time_sec))
+                    st.metric("Within-gender percentile", f"{percent_second:.1f}%")
+                    st.caption(f"{selected_second['name']} · bib #{selected_second['bib']} · gross {clock(selected_second.gross_time_sec)}")
+                    st.metric("Start delay", clock(selected_second.start_delay_sec, compact=True))
+                    st.metric("Above expected", clock(selected_second.overperformance_sec, signed=True, compact=True))
+                with change_col:
+                    st.markdown(f"**Change from {y1} to {y2}**")
+                    st.metric("Net time improvement", clock(delta, signed=True),
+                              help=f"Positive means {y2} was faster than {y1}")
+                    st.metric("Percentile point change", f"{percent_second-percent_first:+.1f} pp")
+                    st.metric("Net pace change", f"{(selected_second.net_time_sec-selected_first.net_time_sec)/RACES[race]['km']:+.1f} s/km",
+                              help="Negative means faster pace in comparison year")
+                st.caption("Percentile: proportion of same-gender finishers slower than the runner in each edition. "
+                           "Percentile changes also depend on changes in the field.")
+
+                basis1col, basis2col = st.columns(2)
+                with basis1col:
+                    basis1 = st.radio(f"{y1} checkpoint clock", ["gross", "net"],
+                                      index=0 if detect_checkpoint_basis(left_df,race)=="gross" else 1,
+                                      format_func=lambda v: "Gun elapsed" if v=="gross" else "Chip elapsed",
+                                      key=f"cross_basis_first_{race}_{y1}_{y2}", horizontal=True)
+                with basis2col:
+                    basis2 = st.radio(f"{y2} checkpoint clock", ["gross", "net"],
+                                      index=0 if detect_checkpoint_basis(right_df,race)=="gross" else 1,
+                                      format_func=lambda v: "Gun elapsed" if v=="gross" else "Chip elapsed",
+                                      key=f"cross_basis_second_{race}_{y1}_{y2}", horizontal=True)
+                fig = go.Figure()
+                for y, rec, color, basis in ((y1, selected_first, SELECTED, basis1),
+                                             (y2, selected_second, COMPARE, basis2)):
+                    prof = get_profile(rec, checkpoint_basis=basis, race=race)
+                    fig.add_trace(go.Scatter(x=[d for d,_ in prof], y=[t/60 for _,t in prof],
+                        mode="lines+markers", name=f"{y} · {clock(rec.net_time_sec)}",
+                        line=dict(color=color, width=4.5, dash="solid" if y==y1 else "dash"),
+                        marker=dict(color=color, size=10, symbol="circle" if y==y1 else "diamond"),
+                        customdata=[clock(t) for _,t in prof],
+                        hovertemplate=f"{y}: %{{x:.1f}} km · %{{customdata}}<extra></extra>"))
+                base_chart(fig, 480)
+                fig.update_layout(title=f"Cumulative net time · {y1} vs {y2}",
+                                  legend=dict(orientation="h", y=1.05, x=0),
+                                  margin=dict(t=85,b=52,l=53,r=22))
+                fig.update_xaxes(title="Distance (km)", range=[0, RACES[race]['km']*1.02])
+                fig.update_yaxes(title="Elapsed chip time (minutes)")
+                st.plotly_chart(fig, use_container_width=True, config={"displaylogo":False})
+                st.caption("Intermediate checkpoints are observed values only. Choose each year's checkpoint "
+                           "clock convention. Historical checkpoints may be missing.")
+                with st.expander("Compare checkpoint times"):
+                    a=dict(get_profile(selected_first, basis1, race))
+                    b=dict(get_profile(selected_second, basis2, race))
+                    distances=sorted(set(a)&set(b))
+                    table=pd.DataFrame([{
+                        "Distance (km)":d,
+                        f"{y1} chip elapsed":clock(a[d]),
+                        f"{y2} chip elapsed":clock(b[d]),
+                        f"Improvement in {y2}":clock(a[d]-b[d],signed=True),
+                    } for d in distances if d>0])
+                    st.dataframe(table, use_container_width=True, hide_index=True)
+            elif selected_first is not None:
+                st.caption(f"Select and confirm the corresponding {y2} result to see the comparison.")
+
 with section_data:
     st.subheader("Data completeness")
     q = st.columns(3)
@@ -585,13 +766,13 @@ with section_data:
     st.dataframe(split_table, use_container_width=True, hide_index=True)
     if len(frame) > 0:
         st.download_button("Download cleaned data (CSV)", frame.drop(columns=["search", "color"]).to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"ljubljana_{race}k_cleaned.csv", mime="text/csv")
+                           file_name=f"ljubljana_{year}_{race}k_cleaned.csv", mime="text/csv")
     with st.expander("Notes about input and interpretation"):
         st.write("Reads CSV/XLSX exports of official overall classifications: both sexes, all ages. "
-                 "For 42 km and 21 km, optional supplemental checkpoints are merged from age-category tables by bib. "
+                 "Checkpoint values are retained from earlier exports only when the runner identity agrees, or taken from any displayed checkpoints. "
                  "Rows without valid net and gross finish are excluded; missing intermediate times are not interpolated. "
                  "For 10 km, the 5 km column may be completely blank at the official source. "
                  "The check-point clock basis for 10 km and 42 km cannot be independently verified using only this data: "
                  "the sidebar setting is an assumption. If a scrape is incomplete, the statistics are not population statistics.")
 
-st.caption(f"Official 2026 TIMING Ljubljana {RACES[race]['long_name']} results. Men and women, all ages.")
+st.caption(f"Official {year} Ljubljana Marathon organizer archive · {RACES[race]['long_name']}. Men and women, all ages.")

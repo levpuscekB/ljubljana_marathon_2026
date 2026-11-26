@@ -1,4 +1,4 @@
-"""Data preparation and statistical utilities for 10/21/42 km Ljubljana results.
+"""Data preparation and statistical utilities for 2025/2026 Ljubljana results.
 
 This module intentionally does not import Streamlit: it can be tested directly.
 """
@@ -28,7 +28,7 @@ BASELINE = "#161D29"
 
 COL_ALIASES = {
     "gender": "gender", "sex": "gender", "spol": "gender",
-    "rank_gross": "rank_gross", "gross rank": "rank_gross", "rank": "rank_gross",
+    "year": "year", "leto": "year", "rank_gross": "rank_gross", "gross rank": "rank_gross", "rank": "rank_gross",
     "bib": "bib", "startna st": "bib", "st": "bib", "st.": "bib",
     "name": "name", "priimek in ime": "name", "runner": "name",
     "country": "country", "club": "club", "klub": "club",
@@ -120,6 +120,8 @@ def prepare_results(raw):
     for col in [f"{km}km_net" for km in ALL_SPLITS]:
         if col not in df:
             df[col] = np.nan
+    if "year" in df.columns:
+        df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
     df["gender"] = df["gender"].astype(str).str.upper().str.strip().replace({
         "MALE": "M", "MOŠKI": "M", "MOSKI": "M", "FEMALE": "F", "Ž": "F", "Z": "F", "ZENSKE": "F", "ŽENSKE": "F"})
     df["name"] = df["name"].fillna("").astype(str).str.strip()
@@ -305,3 +307,37 @@ def local_percentile(df, selected, k_floor=65):
     return {"percentile": pct, "n": len(nearby),
             "delay_min": float(nearby.start_delay_sec.min()),
             "delay_max": float(nearby.start_delay_sec.max())}
+
+
+def athlete_name_key(name):
+    """Conservative, order-insensitive name key; never a unique identity ID."""
+    val = normalize_text(name).replace("ł", "l").replace("đ", "d")
+    return " ".join(sorted(re.findall(r"[a-z0-9]+", val)))
+
+
+def same_distance_year_matches(selected, other_year):
+    """Candidates for manual confirmation, NOT automatic identity matching.
+
+    The same name can belong to distinct people; bib numbers change by year.
+    Country match is preferred, but not required since source fields can differ.
+    """
+    if selected is None or other_year.empty:
+        return other_year.iloc[0:0]
+    key = athlete_name_key(selected['name'])
+    candidates = other_year.loc[
+        (other_year['gender'] == selected['gender']) &
+        (other_year['name'].map(athlete_name_key) == key)
+    ].copy()
+    if candidates.empty:
+        return candidates
+    country = str(selected.get('country', '')).upper()
+    candidates['same_country'] = (candidates['country'].fillna('').astype(str).str.upper() == country)
+    return candidates.sort_values(['same_country','net_time_sec'], ascending=[False,True])
+
+
+def faster_than_percentile(frame, runner):
+    """Within-year, same-gender percentile of chip times (100 = fastest)."""
+    if runner is None:
+        return float('nan')
+    pool = frame.loc[frame.gender == runner.gender, 'net_time_sec'].dropna()
+    return float((pool > runner.net_time_sec).mean() * 100) if len(pool) else float('nan')
